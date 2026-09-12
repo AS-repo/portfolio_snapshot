@@ -35,15 +35,20 @@ def fetch_quote(ticker: str):
     try:
         price = fast.last_price
         prev_close = fast.previous_close
+        currency = fast.currency
     except Exception:
         price = None
         prev_close = None
+        currency = None
     if price is None or prev_close is None or price != price or prev_close != prev_close:
         hist = t.history(period="2d")
         if hist.empty:
             raise ValueError(f"No price data returned for {ticker}")
         price = hist["Close"].iloc[-1]
         prev_close = hist["Close"].iloc[-2] if len(hist) > 1 else price
+    if not currency:
+        print(f"  ! warning: no currency reported for {ticker}, assuming USD", file=sys.stderr)
+        currency = "USD"
     day_change = price - prev_close
     day_change_pct = (day_change / prev_close * 100) if prev_close else 0.0
     return {
@@ -51,7 +56,24 @@ def fetch_quote(ticker: str):
         "prev_close": float(prev_close),
         "day_change": float(day_change),
         "day_change_pct": float(day_change_pct),
+        "currency": currency,
     }
+
+
+def to_gbp_factor(currency: str, usd_gbp_rate: float):
+    """Factor to convert an amount in `currency` into GBP.
+
+    Yahoo reports pence sterling as "GBp" (lowercase p) and pounds as "GBP" -
+    the case distinction is significant and must be checked before upper-casing.
+    """
+    if currency == "GBp":
+        return 0.01
+    currency = (currency or "USD").upper()
+    if currency == "GBP":
+        return 1.0
+    if currency == "USD":
+        return usd_gbp_rate
+    raise ValueError(f"Unsupported currency: {currency!r}")
 
 
 def fetch_fx_rate(pair: str):
@@ -69,20 +91,30 @@ def fetch_fx_rate(pair: str):
     return float(rate)
 
 
-def build_rows(holdings, fx_rate=1.0):
+def build_rows(holdings, usd_gbp_rate=1.0):
+    """Fetch quotes and return rows with every monetary field normalized to GBP,
+    regardless of what currency the ticker quotes in or the cost basis was paid in."""
     rows = []
     for h in holdings:
         ticker = h["ticker"].upper()
+        display_ticker = ticker[:-2] if ticker.endswith(".L") else ticker
         shares = float(h["shares"])
-        avg_price = float(h["avg_price"]) * fx_rate
+        cost_currency = h.get("currency", "USD")
+        avg_price = float(h["avg_price"]) * to_gbp_factor(cost_currency, usd_gbp_rate)
         try:
             q = fetch_quote(ticker)
         except Exception as e:
             print(f"  ! warning: failed to fetch {ticker}: {e}", file=sys.stderr)
             continue
 
-        price = q["price"] * fx_rate
-        day_change = q["day_change"] * fx_rate
+        try:
+            quote_factor = to_gbp_factor(q["currency"], usd_gbp_rate)
+        except ValueError as e:
+            print(f"  ! warning: {e} for {ticker}, skipping", file=sys.stderr)
+            continue
+
+        price = q["price"] * quote_factor
+        day_change = q["day_change"] * quote_factor
         market_value = shares * price
         cost_basis = shares * avg_price
         total_gain = market_value - cost_basis
@@ -90,7 +122,7 @@ def build_rows(holdings, fx_rate=1.0):
         day_pl = shares * day_change
 
         rows.append({
-            "ticker": ticker,
+            "ticker": display_ticker,
             "shares": shares,
             "avg_price": avg_price,
             "price": price,
@@ -103,6 +135,17 @@ def build_rows(holdings, fx_rate=1.0):
             "total_gain_pct": total_gain_pct,
         })
     return rows
+
+
+MONEY_FIELDS = ("avg_price", "price", "day_change", "day_pl", "market_value", "cost_basis", "total_gain")
+
+
+def convert_rows(rows, factor):
+    """Scale every monetary field in each row by `factor` (percentages are untouched)."""
+    return [
+        {**r, **{field: r[field] * factor for field in MONEY_FIELDS}}
+        for r in rows
+    ]
 
 
 def fmt_money(x, symbol="£"):
@@ -155,14 +198,12 @@ def main():
         print(f"Holdings file not found: {holdings_path}", file=sys.stderr)
         sys.exit(1)
 
-    fx_rate = 1.0
-    if not args.usd:
-        print("Fetching USD/GBP exchange rate...", file=sys.stderr)
-        fx_rate = fetch_fx_rate("GBP=X")
+    print("Fetching USD/GBP exchange rate...", file=sys.stderr)
+    usd_gbp_rate = fetch_fx_rate("GBP=X")
 
     holdings = load_holdings(holdings_path)
     print(f"Fetching live prices for {len(holdings)} holdings...", file=sys.stderr)
-    rows = build_rows(holdings, fx_rate=fx_rate)
+    rows = build_rows(holdings, usd_gbp_rate=usd_gbp_rate)
     if not rows:
         print("No prices could be fetched. Exiting.", file=sys.stderr)
         sys.exit(1)
@@ -170,6 +211,8 @@ def main():
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
+    if args.usd:
+        rows = convert_rows(rows, 1 / usd_gbp_rate)
     symbol = "$" if args.usd else "£"
     markdown = render_markdown(rows, timestamp, symbol)
     print()

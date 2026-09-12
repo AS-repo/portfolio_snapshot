@@ -1,4 +1,5 @@
 [
   { "ticker": "AAPL", "shares": 10, "avg_price": 150.00 },
-  { "ticker": "MSFT", "shares": 5, "avg_price": 300.00 }
+  { "ticker": "MSFT", "shares": 5, "avg_price": 300.00 },
+  { "ticker": "VUKG.L", "shares": 20, "avg_price": 50.00, "currency": "GBP" }
 ]
