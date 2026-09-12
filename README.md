@@ -17,4 +17,4 @@ cp holdings.example.json holdings.json   # fill in your positions; gitignored
 python3 portfolio_tracker.py
 ```
 
-Flags: `--holdings <file>` to use a different holdings file, `--no-snapshot` to skip saving.
+Reports values in GBP by default (converted from the underlying quote via a live USD/GBP rate). Flags: `--holdings <file>` to use a different holdings file, `--no-snapshot` to skip saving, `--usd` to report in USD instead.

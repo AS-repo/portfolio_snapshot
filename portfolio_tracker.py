@@ -54,30 +54,47 @@ def fetch_quote(ticker: str):
     }
 
 
-def build_rows(holdings):
+def fetch_fx_rate(pair: str):
+    t = yf.Ticker(pair)
+    fast = t.fast_info
+    try:
+        rate = fast.last_price
+    except Exception:
+        rate = None
+    if rate is None or rate != rate:
+        hist = t.history(period="2d")
+        if hist.empty:
+            raise ValueError(f"No FX rate data returned for {pair}")
+        rate = hist["Close"].iloc[-1]
+    return float(rate)
+
+
+def build_rows(holdings, fx_rate=1.0):
     rows = []
     for h in holdings:
         ticker = h["ticker"].upper()
         shares = float(h["shares"])
-        avg_price = float(h["avg_price"])
+        avg_price = float(h["avg_price"]) * fx_rate
         try:
             q = fetch_quote(ticker)
         except Exception as e:
             print(f"  ! warning: failed to fetch {ticker}: {e}", file=sys.stderr)
             continue
 
-        market_value = shares * q["price"]
+        price = q["price"] * fx_rate
+        day_change = q["day_change"] * fx_rate
+        market_value = shares * price
         cost_basis = shares * avg_price
         total_gain = market_value - cost_basis
         total_gain_pct = (total_gain / cost_basis * 100) if cost_basis else 0.0
-        day_pl = shares * q["day_change"]
+        day_pl = shares * day_change
 
         rows.append({
             "ticker": ticker,
             "shares": shares,
             "avg_price": avg_price,
-            "price": q["price"],
-            "day_change": q["day_change"],
+            "price": price,
+            "day_change": day_change,
             "day_change_pct": q["day_change_pct"],
             "day_pl": day_pl,
             "market_value": market_value,
@@ -88,9 +105,9 @@ def build_rows(holdings):
     return rows
 
 
-def fmt_money(x):
+def fmt_money(x, symbol="£"):
     sign = "-" if x < 0 else ""
-    return f"{sign}${abs(x):,.2f}"
+    return f"{sign}{symbol}{abs(x):,.2f}"
 
 
 def fmt_pct(x):
@@ -98,7 +115,7 @@ def fmt_pct(x):
     return f"{sign}{x:.2f}%"
 
 
-def render_markdown(rows, timestamp):
+def render_markdown(rows, timestamp, symbol="£"):
     total_value = sum(r["market_value"] for r in rows)
     total_cost = sum(r["cost_basis"] for r in rows)
     total_day_pl = sum(r["day_pl"] for r in rows)
@@ -113,15 +130,15 @@ def render_markdown(rows, timestamp):
     lines.append("|---|---|---|---|---|---|---|---|---|")
     for r in sorted(rows, key=lambda x: -x["market_value"]):
         lines.append(
-            f"| {r['ticker']} | {r['shares']:g} | {fmt_money(r['avg_price'])} | "
-            f"{fmt_money(r['price'])} | {fmt_money(r['day_change'])} | {fmt_pct(r['day_change_pct'])} | "
-            f"{fmt_money(r['market_value'])} | {fmt_money(r['total_gain'])} | {fmt_pct(r['total_gain_pct'])} |"
+            f"| {r['ticker']} | {r['shares']:g} | {fmt_money(r['avg_price'], symbol)} | "
+            f"{fmt_money(r['price'], symbol)} | {fmt_money(r['day_change'], symbol)} | {fmt_pct(r['day_change_pct'])} | "
+            f"{fmt_money(r['market_value'], symbol)} | {fmt_money(r['total_gain'], symbol)} | {fmt_pct(r['total_gain_pct'])} |"
         )
     lines.append("")
     lines.append(
-        f"**Total value:** {fmt_money(total_value)}  |  "
-        f"**Day P/L:** {fmt_money(total_day_pl)} ({fmt_pct(total_day_pct)})  |  "
-        f"**Total G/L:** {fmt_money(total_gain)} ({fmt_pct(total_gain_pct)})"
+        f"**Total value:** {fmt_money(total_value, symbol)}  |  "
+        f"**Day P/L:** {fmt_money(total_day_pl, symbol)} ({fmt_pct(total_day_pct)})  |  "
+        f"**Total G/L:** {fmt_money(total_gain, symbol)} ({fmt_pct(total_gain_pct)})"
     )
     return "\n".join(lines)
 
@@ -130,6 +147,7 @@ def main():
     parser = argparse.ArgumentParser(description="Track a stock portfolio with live prices.")
     parser.add_argument("--holdings", default=str(SCRIPT_DIR / "holdings.json"), help="Path to holdings JSON file")
     parser.add_argument("--no-snapshot", action="store_true", help="Skip saving a markdown snapshot file")
+    parser.add_argument("--usd", action="store_true", help="Report values in USD instead of the GBP default")
     args = parser.parse_args()
 
     holdings_path = Path(args.holdings)
@@ -137,9 +155,14 @@ def main():
         print(f"Holdings file not found: {holdings_path}", file=sys.stderr)
         sys.exit(1)
 
+    fx_rate = 1.0
+    if not args.usd:
+        print("Fetching USD/GBP exchange rate...", file=sys.stderr)
+        fx_rate = fetch_fx_rate("GBP=X")
+
     holdings = load_holdings(holdings_path)
     print(f"Fetching live prices for {len(holdings)} holdings...", file=sys.stderr)
-    rows = build_rows(holdings)
+    rows = build_rows(holdings, fx_rate=fx_rate)
     if not rows:
         print("No prices could be fetched. Exiting.", file=sys.stderr)
         sys.exit(1)
@@ -147,7 +170,8 @@ def main():
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    markdown = render_markdown(rows, timestamp)
+    symbol = "$" if args.usd else "£"
+    markdown = render_markdown(rows, timestamp, symbol)
     print()
     print(markdown)
     print()
