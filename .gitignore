@@ -1,0 +1,5 @@
+holdings.json
+snapshots/
+__pycache__/
+*.pyc
+.DS_Store
